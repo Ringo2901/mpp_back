@@ -5,20 +5,12 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 require('dotenv').config();
+const { ApolloServer, gql } = require('apollo-server-express');
+const { getTasks, createTask, updateTask, deleteTask, getFile } = require('./services/taskService');
 const authService = require('./services/authService');
 
 const app = express();
-const http = require('http').createServer(app);
-const { Server } = require('socket.io');
-const {updateTask, deleteTask, createTask, getTasks} = require("./services/taskService");
-const io = new Server(http, {
-    cors: {
-        origin: 'http://localhost:4200',
-        credentials: true,
-    },
-});
 
-// Middleware
 app.use(cors({
     origin: 'http://localhost:4200',
     credentials: true,
@@ -26,88 +18,106 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
-
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-io.on('connection', (socket) => {
-    console.log('Новое подключение через WebSocket: ', socket.id);
+const typeDefs = gql`
+  type Task {
+    id: ID!
+    title: String!
+    status: String!
+    dueDate: String!
+    file: String
+    fileName: String
+  }
 
-    socket.on('register', async ({ username, password }) => {
-        try {
-            const result = await authService.register(username, password);
-            socket.emit('registerSuccess', { message: 'Registered successfully', user: result });
-        } catch (err) {
-            socket.emit('error', { message: err.message });
-        }
-    });
+  type Query {
+    tasks: [Task!]!
+    getFile(filename: String!): String!
+  }
 
-    socket.on('login', async ({ username, password }) => {
-        try {
-            const token = await authService.login(username, password);
+  type Mutation {
+    register(username: String!, password: String!): String!
+    login(username: String!, password: String!): String!
+    logout: String!
+    createTask(title: String!, status: String!, dueDate: String!, file: String, fileName: String): Task!
+    updateTask(id: ID!, title: String!, status: String!, dueDate: String!): Task!
+    deleteTask(id: ID!): ID!
+  }
+`;
 
-            socket.emit('loginSuccess', { message: 'Logged in successfully', username });
+const resolvers = {
+    Query: {
+        tasks: () => getTasks(),
+        getFile: (_, { filename }) => {
+            try {
+                return getFile(filename);
+            } catch (err) {
+                throw new Error(err.message);
+            }
+        },
+    },
+    Mutation: {
+        register: async (_, { username, password }) => {
+            try {
+                const result = await authService.register(username, password);
+                return 'Registered successfully';
+            } catch (err) {
+                throw new Error(err.message);
+            }
+        },
+        login: async (_, { username, password }, { res }) => {
+            try {
+                const token = await authService.login(username, password);
+                // Установка токена в cookie
+                res.cookie('token', token, { httpOnly: true });
+                return 'Logged in successfully';
+            } catch (err) {
+                throw new Error(err.message);
+            }
+        },
+        logout: (_, __, { res }) => {
+            res.clearCookie('token');
+            return 'Logged out successfully';
+        },
+        createTask: (_, { title, status, dueDate, file, fileName }) => {
+            try {
+                return createTask({ title, status, dueDate, file, fileName });
+            } catch (err) {
+                throw new Error(err.message);
+            }
+        },
+        updateTask: (_, { id, title, status, dueDate }) => {
+            try {
+                return updateTask(id, { title, status, dueDate });
+            } catch (err) {
+                throw new Error(err.message);
+            }
+        },
+        deleteTask: (_, { id }) => {
+            try {
+                deleteTask(id);
+                return id;
+            } catch (err) {
+                throw new Error(err.message);
+            }
+        },
+    },
+};
 
-            require('socket.io-cookie')(io, {
-                cookieName: 'token',
-                secret: token,
-                httpOnly: true,
-            });
-        } catch (err) {
-            socket.emit('error', { message: err.message });
-        }
-    });
-
-    socket.on('logout', () => {
-        try {
-            socket.emit('logoutSuccess', { message: 'Logged out successfully' });
-        } catch (err) {
-            socket.emit('error', { message: err.message });
-        }
-    });
-
-    socket.on('getTasks', async () => {
-        try {
-            const tasks = await getTasks();
-            socket.emit('tasks', tasks);
-        } catch (err) {
-            socket.emit('error', { message: 'Failed to retrieve tasks' });
-        }
-    });
-
-    socket.on('createTask', async (taskData) => {
-        try {
-            console.log('Received taskData:', taskData);
-            const newTask = await createTask(taskData);
-            io.emit('taskCreated', newTask);
-        } catch (err) {
-            socket.emit('error', { message: 'Failed to create task' });
-        }
-    });
-
-    socket.on('updateTask', async ({ id, taskData }) => {
-        try {
-            const updatedTask = await updateTask(id, taskData);
-            io.emit('taskUpdated', updatedTask);
-        } catch (err) {
-            socket.emit('error', { message: 'Failed to update task' });
-        }
-    });
-
-    socket.on('deleteTask', async (id) => {
-        try {
-            await deleteTask(id);
-            io.emit('taskDeleted', id);
-        } catch (err) {
-            socket.emit('error', { message: 'Failed to delete task' });
-        }
-    });
-
-    socket.on('disconnect', () => {
-        console.log('Пользователь отключился от WebSocket');
-    });
+const server = new ApolloServer({
+    typeDefs,
+    resolvers,
+    context: ({ req, res }) => ({ req, res }),
 });
 
-const PORT = 3000;
-http.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+server.start().then(() => {
+    server.applyMiddleware({ app, path: '/',     cors: {
+            origin: 'http://localhost:4200',
+            credentials: true,
+        },});
+
+    const PORT = 3000;
+    app.listen(PORT, () => {
+        console.log(`Server is running on port ${PORT} and GraphQL is available at http://localhost:${PORT}/`);
+    });
 });
